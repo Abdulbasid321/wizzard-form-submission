@@ -1,0 +1,40 @@
+﻿{
+  "locale": "en",
+  "website": "",
+  "basicInfo": {
+    "fullName": "Amina Yusuf",
+    "email": "amina@example.com",
+    "phone": "+2348012345678",
+    "countryOfResidence": "Nigeria"
+  },
+  "medical": {
+    "treatment": "Cardiology",
+    "diagnosis": "Suspected heart valve problem.\nSecond opinion needed.",
+    "medicalHistory": "Hypertension for 5 years.",
+    "medications": "Amlodipine",
+    "allergies": "Penicillin"
+  },
+  "travel": {
+    "destinations": ["Egypt", "Saudi Arabia"],
+    "treatmentTimeline": "Within 3 months",
+    "preferredHospital": "Any top cardiac hospital in Cairo",
+    "language": "English",
+    "travelingCompanion": "Spouse",
+    "specialRequirements": "Wheelchair access at the airport"
+  },
+  "budget": {
+    "range": "5,000 - 10,000 USD",
+    "includesTravelAccommodation": true,
+    "fundingSource": "Personal savings",
+    "financingInterest": false,
+    "notes": "Flexible if the hospital is a strong match."
+  },
+  "files": {
+    "diagnosisReports": [
+      { "name": "MRI scan.pdf", "url": "https://res.cloudinary.com/demo/raw/upload/sample.pdf" }
+    ],
+    "medicalRecords": [
+      { "name": "History.pdf", "url": "https://res.cloudinary.com/demo/raw/upload/sample.pdf" }
+    ]
+  }
+}

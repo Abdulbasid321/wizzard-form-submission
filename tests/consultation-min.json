@@ -1,0 +1,11 @@
+﻿{
+  "basicInfo": {
+    "fullName": "Min Test",
+    "email": "min@example.com",
+    "phone": "+2348000000000",
+    "countryOfResidence": "Nigeria"
+  },
+  "medical": { "treatment": "Orthopaedics" },
+  "travel": { "destinations": ["Egypt"], "treatmentTimeline": "Flexible" },
+  "budget": { "range": "Under 5,000 USD" }
+}

@@ -1,0 +1,8 @@
+﻿{
+  "fullName": "Min Booking",
+  "email": "minbooking@example.com",
+  "phone": "+2348000000001",
+  "preferredDate": "2026-12-12",
+  "preferredTime": "2:30 PM",
+  "consultationMethod": "Phone call"
+}

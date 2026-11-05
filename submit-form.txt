@@ -1,0 +1,523 @@
+import type { Handler } from "@netlify/functions";
+import { Resend } from "resend";
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+// Brand colours, estimated by eye from the website design.
+// Replace with the exact hex codes from Faith / the design file.
+const BRAND = {
+  dark: "#06201F",
+  gold: "#C9A24D",
+  goldDeep: "#8F6B1F",
+  page: "#F2EFE8",
+  card: "#FFFFFF",
+  text: "#12201F",
+  muted: "#6B7775",
+  border: "#E7E2D6",
+  softBg: "#F8F6F0",
+  headerMuted: "#B7C6C3",
+};
+
+const FONT = "'Helvetica Neue',Helvetica,Arial,sans-serif";
+
+// Email labels live in one map, so they are easy to change or translate later
+const LABELS = {
+  brandName: "Curative Journeys",
+  title: "New consultation request",
+  submittedAt: "Submitted",
+  language: "Language",
+  basicInfo: "Basic information",
+  fullName: "Full name",
+  email: "Email",
+  phone: "Phone",
+  countryOfResidence: "Country of residence",
+  medicalNeed: "Medical need",
+  treatment: "Treatment sought",
+  diagnosis: "Diagnosis / condition details",
+  medicalHistory: "Medical history",
+  medications: "Medications",
+  allergies: "Allergies",
+  travel: "Travel preferences",
+  destinations: "Destination(s)",
+  timeline: "Treatment timeline",
+  preferredHospital: "Preferred hospital / specialist",
+  preferredLanguage: "Preferred language",
+  companion: "Traveling companion",
+  specialRequirements: "Accessibility / special requirements",
+  budget: "Budget",
+  budgetRange: "Estimated range",
+  includesTravel: "Budget includes travel & accommodation",
+  fundingSource: "Funding source",
+  financingInterest: "Interested in financing",
+  budgetNotes: "Additional budget notes",
+  booking: "Consultation booking",
+  preferredDate: "Preferred date",
+  files: "Medical files",
+  diagnosisFiles: "Diagnosis reports & imaging",
+  recordFiles: "Medical records",
+  replyTo: "Reply to",
+  call: "Call",
+  footer: "Sent from the Curative Journeys website consultation form",
+};
+
+type FileItem = { name: string; url: string };
+
+type Submission = {
+  locale: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  countryOfResidence: string;
+  treatment: string;
+  diagnosis: string;
+  medicalHistory: string;
+  medications: string;
+  allergies: string;
+  destinations: string[];
+  treatmentTimeline: string;
+  preferredHospital: string;
+  preferredLanguage: string;
+  travelingCompanion: string;
+  specialRequirements: string;
+  budgetRange: string;
+  budgetIncludesTravel: string;
+  fundingSource: string;
+  financingInterest: string;
+  budgetNotes: string;
+  preferredDate: string;
+  diagnosisFiles: FileItem[];
+  recordFiles: FileItem[];
+};
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_BODY_BYTES = 100_000;
+
+const buildHeaders = (origin?: string): Record<string, string> => {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+  if (origin && allowedOrigins.includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
+};
+
+const escapeHtml = (value: string): string =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+const asObject = (v: unknown): Record<string, unknown> =>
+  v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {};
+
+const asString = (v: unknown, max: number): string =>
+  typeof v === "string" ? v.trim().slice(0, max) : "";
+
+// Accepts an array of strings or a single string
+const asStringList = (v: unknown, maxItems: number, maxLen: number): string[] => {
+  const list = Array.isArray(v) ? v : typeof v === "string" ? [v] : [];
+  return list
+    .map((x) => asString(x, maxLen))
+    .filter(Boolean)
+    .slice(0, maxItems);
+};
+
+// Accepts true/false or "yes"/"no" strings, returns "Yes", "No" or ""
+const asYesNo = (v: unknown): string => {
+  if (v === true) return "Yes";
+  if (v === false) return "No";
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (["yes", "true", "y"].includes(s)) return "Yes";
+    if (["no", "false", "n"].includes(s)) return "No";
+  }
+  return "";
+};
+
+const parseFiles = (
+  value: unknown,
+  field: string,
+  errors: Record<string, string>
+): FileItem[] => {
+  if (!Array.isArray(value)) return [];
+  const out: FileItem[] = [];
+  value.slice(0, 10).forEach((f, i) => {
+    const item = asObject(f);
+    const url = asString(item.url, 1000);
+    if (!url) return;
+    let isHttps = false;
+    try {
+      isHttps = new URL(url).protocol === "https:";
+    } catch {
+      isHttps = false;
+    }
+    if (!isHttps) {
+      errors[`files.${field}.${i}.url`] = "Invalid file URL";
+      return;
+    }
+    out.push({ name: asString(item.name, 200) || `File ${i + 1}`, url });
+  });
+  return out;
+};
+
+const validate = (
+  raw: Record<string, unknown>
+): { errors: Record<string, string>; data: Submission } => {
+  const errors: Record<string, string> = {};
+
+  const basic = asObject(raw.basicInfo);
+  const medical = asObject(raw.medical);
+  const travel = asObject(raw.travel);
+  const budget = asObject(raw.budget);
+  const booking = asObject(raw.booking);
+  const files = asObject(raw.files);
+
+  const data: Submission = {
+    locale: asString(raw.locale, 5) === "fr" ? "fr" : "en",
+    fullName: asString(basic.fullName, 120),
+    email: asString(basic.email, 200),
+    phone: asString(basic.phone, 40),
+    countryOfResidence: asString(basic.countryOfResidence, 100),
+    treatment: asString(medical.treatment, 200),
+    diagnosis: asString(medical.diagnosis, 3000),
+    medicalHistory: asString(medical.medicalHistory, 3000),
+    medications: asString(medical.medications, 1000),
+    allergies: asString(medical.allergies, 1000),
+    destinations: asStringList(travel.destinations, 5, 100),
+    treatmentTimeline: asString(travel.treatmentTimeline, 200),
+    preferredHospital: asString(travel.preferredHospital, 200),
+    preferredLanguage: asString(travel.language, 100),
+    travelingCompanion: asString(travel.travelingCompanion, 200),
+    specialRequirements: asString(travel.specialRequirements, 1000),
+    budgetRange: asString(budget.range, 100),
+    budgetIncludesTravel: asYesNo(budget.includesTravelAccommodation),
+    fundingSource: asString(budget.fundingSource, 200),
+    financingInterest: asYesNo(budget.financingInterest),
+    budgetNotes: asString(budget.notes, 2000),
+    preferredDate: asString(booking.preferredDate, 100),
+    diagnosisFiles: parseFiles(files.diagnosisReports, "diagnosisReports", errors),
+    recordFiles: parseFiles(files.medicalRecords, "medicalRecords", errors),
+  };
+
+  if (!data.fullName) errors["basicInfo.fullName"] = "Full name is required";
+  if (!EMAIL_REGEX.test(data.email)) errors["basicInfo.email"] = "Invalid email";
+  if (!data.phone) errors["basicInfo.phone"] = "Phone is required";
+  if (!data.countryOfResidence)
+    errors["basicInfo.countryOfResidence"] = "Country of residence is required";
+  if (!data.treatment) errors["medical.treatment"] = "Treatment is required";
+  if (data.destinations.length === 0)
+    errors["travel.destinations"] = "At least one destination is required";
+  if (!data.treatmentTimeline)
+    errors["travel.treatmentTimeline"] = "Treatment timeline is required";
+  if (!data.budgetRange) errors["budget.range"] = "Budget range is required";
+
+  return { errors, data };
+};
+
+// ---------- Email template ----------
+
+const labelStyle = `font-family:${FONT};font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:${BRAND.muted};`;
+
+const row = (label: string, value: string): string =>
+  value
+    ? `<tr>
+        <td style="padding:12px 0;border-bottom:1px solid ${BRAND.border};">
+          <div style="${labelStyle}">${escapeHtml(label)}</div>
+          <div style="font-family:${FONT};font-size:15px;line-height:1.5;color:${BRAND.text};margin-top:4px;">${escapeHtml(value).replace(/\n/g, "<br>")}</div>
+        </td>
+      </tr>`
+    : "";
+
+// For long free-text answers, shown in a highlighted box
+const textBlock = (label: string, value: string): string =>
+  value
+    ? `<tr>
+        <td style="padding:12px 0 0;">
+          <div style="${labelStyle}margin-bottom:8px;">${escapeHtml(label)}</div>
+          <div style="font-family:${FONT};font-size:15px;line-height:1.6;color:${BRAND.text};background:${BRAND.softBg};border-left:3px solid ${BRAND.gold};padding:14px 16px;border-radius:4px;">${escapeHtml(value).replace(/\n/g, "<br>")}</div>
+        </td>
+      </tr>`
+    : "";
+
+const section = (title: string, rows: string): string =>
+  rows.trim()
+    ? `<tr>
+        <td style="padding:28px 32px 0;">
+          <div style="font-family:${FONT};font-size:12px;font-weight:bold;letter-spacing:0.14em;text-transform:uppercase;color:${BRAND.goldDeep};">${escapeHtml(title)}</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:6px;">${rows}</table>
+        </td>
+      </tr>`
+    : "";
+
+const glanceStrip = (items: { label: string; value: string }[]): string => {
+  const shown = items.filter((i) => i.value);
+  if (shown.length === 0) return "";
+  const width = Math.floor(100 / shown.length);
+  const cells = shown
+    .map(
+      (i, idx) => `<td width="${width}%" valign="top" style="padding:14px 16px;${idx > 0 ? `border-left:1px solid ${BRAND.border};` : ""}">
+        <div style="${labelStyle}">${escapeHtml(i.label)}</div>
+        <div style="font-family:${FONT};font-size:15px;font-weight:bold;color:${BRAND.text};margin-top:4px;">${escapeHtml(i.value)}</div>
+      </td>`
+    )
+    .join("");
+  return `<tr>
+    <td style="padding:24px 32px 0;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${BRAND.softBg};border:1px solid ${BRAND.border};border-radius:8px;">
+        <tr>${cells}</tr>
+      </table>
+    </td>
+  </tr>`;
+};
+
+const actionButtons = (d: Submission): string => {
+  const firstName = d.fullName.split(" ")[0] || d.fullName;
+  const telDigits = d.phone.replace(/[^\d+]/g, "");
+  return `<tr>
+    <td style="padding:24px 32px 0;">
+      <a href="mailto:${escapeHtml(d.email)}" style="display:inline-block;background:${BRAND.gold};color:${BRAND.dark};font-family:${FONT};font-size:14px;font-weight:bold;text-decoration:none;padding:12px 20px;border-radius:6px;margin:0 8px 8px 0;">${escapeHtml(LABELS.replyTo)} ${escapeHtml(firstName)} &rarr;</a>
+      ${
+        telDigits
+          ? `<a href="tel:${escapeHtml(telDigits)}" style="display:inline-block;color:${BRAND.goldDeep};font-family:${FONT};font-size:14px;font-weight:bold;text-decoration:none;padding:11px 20px;border-radius:6px;border:1px solid ${BRAND.gold};margin:0 8px 8px 0;">${escapeHtml(LABELS.call)} ${escapeHtml(d.phone)}</a>`
+          : ""
+      }
+    </td>
+  </tr>`;
+};
+
+const fileGroup = (title: string, files: FileItem[]): string =>
+  files.length === 0
+    ? ""
+    : `<div style="margin-top:14px;">
+        <div style="${labelStyle}">${escapeHtml(title)}</div>
+        <div style="margin-top:8px;">
+          ${files
+            .map(
+              (f) =>
+                `<a href="${escapeHtml(f.url)}" style="display:inline-block;background:${BRAND.dark};color:${BRAND.gold};font-family:${FONT};font-size:14px;text-decoration:none;padding:10px 16px;border-radius:6px;margin:0 8px 8px 0;">&#128206; ${escapeHtml(f.name)}</a>`
+            )
+            .join("")}
+        </div>
+      </div>`;
+
+const filesSection = (d: Submission): string => {
+  const groups =
+    fileGroup(LABELS.diagnosisFiles, d.diagnosisFiles) +
+    fileGroup(LABELS.recordFiles, d.recordFiles);
+  if (!groups) return "";
+  return `<tr>
+    <td style="padding:28px 32px 0;">
+      <div style="font-family:${FONT};font-size:12px;font-weight:bold;letter-spacing:0.14em;text-transform:uppercase;color:${BRAND.goldDeep};">${escapeHtml(LABELS.files)}</div>
+      ${groups}
+    </td>
+  </tr>`;
+};
+
+const buildHtml = (d: Submission, submittedAt: string): string => {
+  const destinations = d.destinations.join(", ");
+  const subtitle = [destinations, d.treatment].filter(Boolean).join(" · ");
+  const preheader = [d.fullName, subtitle].filter(Boolean).join(" · ");
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:${BRAND.page};">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;font-size:1px;line-height:1px;color:${BRAND.page};">${escapeHtml(preheader)}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${BRAND.page};">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:${BRAND.card};border-radius:12px;overflow:hidden;">
+
+          <tr>
+            <td style="background:${BRAND.dark};padding:32px;">
+              <div style="font-family:${FONT};font-size:13px;letter-spacing:0.18em;text-transform:uppercase;color:${BRAND.headerMuted};margin-bottom:18px;">${escapeHtml(LABELS.brandName)}</div>
+              <span style="display:inline-block;border:1px solid ${BRAND.gold};color:${BRAND.gold};font-family:${FONT};font-size:11px;letter-spacing:0.14em;text-transform:uppercase;border-radius:999px;padding:5px 12px;">${escapeHtml(LABELS.title)}</span>
+              <h1 style="font-family:${FONT};font-size:28px;line-height:1.25;font-weight:normal;color:#ffffff;margin:16px 0 6px;">${escapeHtml(d.fullName)}</h1>
+              <div style="font-family:${FONT};font-size:14px;color:${BRAND.headerMuted};">${escapeHtml(subtitle)}</div>
+            </td>
+          </tr>
+
+          ${actionButtons(d)}
+
+          ${glanceStrip([
+            { label: LABELS.destinations, value: destinations },
+            { label: LABELS.treatment, value: d.treatment },
+            { label: LABELS.budget, value: d.budgetRange },
+          ])}
+
+          ${section(
+            LABELS.basicInfo,
+            row(LABELS.fullName, d.fullName) +
+              row(LABELS.email, d.email) +
+              row(LABELS.phone, d.phone) +
+              row(LABELS.countryOfResidence, d.countryOfResidence)
+          )}
+
+          ${section(
+            LABELS.medicalNeed,
+            row(LABELS.treatment, d.treatment) +
+              textBlock(LABELS.diagnosis, d.diagnosis) +
+              textBlock(LABELS.medicalHistory, d.medicalHistory) +
+              row(LABELS.medications, d.medications) +
+              row(LABELS.allergies, d.allergies)
+          )}
+
+          ${section(
+            LABELS.travel,
+            row(LABELS.destinations, destinations) +
+              row(LABELS.timeline, d.treatmentTimeline) +
+              row(LABELS.preferredHospital, d.preferredHospital) +
+              row(LABELS.preferredLanguage, d.preferredLanguage) +
+              row(LABELS.companion, d.travelingCompanion) +
+              textBlock(LABELS.specialRequirements, d.specialRequirements)
+          )}
+
+          ${section(
+            LABELS.budget,
+            row(LABELS.budgetRange, d.budgetRange) +
+              row(LABELS.includesTravel, d.budgetIncludesTravel) +
+              row(LABELS.fundingSource, d.fundingSource) +
+              row(LABELS.financingInterest, d.financingInterest) +
+              textBlock(LABELS.budgetNotes, d.budgetNotes)
+          )}
+
+          ${section(LABELS.booking, row(LABELS.preferredDate, d.preferredDate))}
+
+          ${filesSection(d)}
+
+          <tr>
+            <td style="padding:32px;">
+              <div style="border-top:1px solid ${BRAND.border};padding-top:16px;font-family:${FONT};font-size:12px;line-height:1.6;color:${BRAND.muted};">
+                ${escapeHtml(LABELS.footer)}<br>
+                ${escapeHtml(LABELS.submittedAt)}: ${escapeHtml(submittedAt)} &middot; ${escapeHtml(LABELS.language)}: ${escapeHtml(d.locale.toUpperCase())}
+              </div>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+};
+
+const buildText = (d: Submission, submittedAt: string): string => {
+  const line = (label: string, value: string) => (value ? `${label}: ${value}` : "");
+  return [
+    LABELS.title,
+    `${LABELS.submittedAt}: ${submittedAt}`,
+    "",
+    line(LABELS.fullName, d.fullName),
+    line(LABELS.email, d.email),
+    line(LABELS.phone, d.phone),
+    line(LABELS.countryOfResidence, d.countryOfResidence),
+    "",
+    line(LABELS.treatment, d.treatment),
+    line(LABELS.diagnosis, d.diagnosis),
+    line(LABELS.medicalHistory, d.medicalHistory),
+    line(LABELS.medications, d.medications),
+    line(LABELS.allergies, d.allergies),
+    "",
+    line(LABELS.destinations, d.destinations.join(", ")),
+    line(LABELS.timeline, d.treatmentTimeline),
+    line(LABELS.preferredHospital, d.preferredHospital),
+    line(LABELS.preferredLanguage, d.preferredLanguage),
+    line(LABELS.companion, d.travelingCompanion),
+    line(LABELS.specialRequirements, d.specialRequirements),
+    "",
+    line(LABELS.budgetRange, d.budgetRange),
+    line(LABELS.includesTravel, d.budgetIncludesTravel),
+    line(LABELS.fundingSource, d.fundingSource),
+    line(LABELS.financingInterest, d.financingInterest),
+    line(LABELS.budgetNotes, d.budgetNotes),
+    line(LABELS.preferredDate, d.preferredDate),
+    "",
+    ...d.diagnosisFiles.map((f) => `${LABELS.diagnosisFiles} - ${f.name}: ${f.url}`),
+    ...d.recordFiles.map((f) => `${LABELS.recordFiles} - ${f.name}: ${f.url}`),
+  ].join("\n");
+};
+
+// ---------- Handler ----------
+
+export const handler: Handler = async (event) => {
+  const headers = buildHeaders(event.headers.origin);
+
+  const respond = (statusCode: number, body: Record<string, unknown>) => ({
+    statusCode,
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 204, headers, body: "" };
+  }
+
+  if (event.httpMethod !== "POST") {
+    return respond(405, { ok: false, error: "METHOD_NOT_ALLOWED" });
+  }
+
+  if ((event.body ?? "").length > MAX_BODY_BYTES) {
+    return respond(413, { ok: false, error: "PAYLOAD_TOO_LARGE" });
+  }
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = asObject(JSON.parse(event.body ?? "{}"));
+  } catch {
+    return respond(400, { ok: false, error: "INVALID_JSON" });
+  }
+
+  // Honeypot: real users never fill this hidden field, bots often do.
+  // Reply with success so bots don't learn they were caught, but send nothing.
+  if (asString(raw.website, 200) !== "") {
+    return respond(200, { ok: true });
+  }
+
+  const { errors, data } = validate(raw);
+  if (Object.keys(errors).length > 0) {
+    return respond(400, { ok: false, error: "VALIDATION_ERROR", fields: errors });
+  }
+
+  const submittedAt = new Date().toLocaleString("en-NG", {
+    timeZone: "Africa/Lagos",
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+
+  // Remove line breaks so user input can't tamper with the subject header
+  const safeName = data.fullName.replace(/[\r\n]+/g, " ");
+  const safeDestinations = data.destinations.join(", ").replace(/[\r\n]+/g, " ");
+
+  try {
+    const { error } = await resend.emails.send({
+      from: process.env.FROM_EMAIL!,
+      to: process.env.CLIENT_EMAIL!,
+      replyTo: data.email,
+      subject: `New consultation request: ${safeName} (${safeDestinations})`,
+      html: buildHtml(data, submittedAt),
+      text: buildText(data, submittedAt),
+    });
+
+    if (error) {
+      console.error("Resend error:", error);
+      return respond(502, { ok: false, error: "EMAIL_FAILED" });
+    }
+
+    return respond(200, { ok: true });
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return respond(500, { ok: false, error: "SERVER_ERROR" });
+  }
+};

@@ -1,0 +1,21 @@
+{
+  "name": "curative-journeys-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@netlify/functions": "^6.1.0",
+    "resend": "^6.37.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "netlify-cli": "^27.16.2",
+    "typescript": "^5.9.3"
+  }
+}
