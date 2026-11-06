@@ -11,6 +11,24 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "")
 
 const MAX_BODY_BYTES = 100_000;
 
+// const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "")
+//   .split(",")
+//   .map((o) => o.trim())
+//   .filter(Boolean);
+
+const buildCorsHeaders = (origin: string | undefined, methods: string) => {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Methods": methods,
+    "Access-Control-Allow-Headers": "Content-Type",
+    Vary: "Origin",
+  };
+  if (origin && allowedOrigins.includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
+};
+
 const buildHeaders = (origin?: string): Record<string, string> => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
